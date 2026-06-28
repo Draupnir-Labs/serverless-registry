@@ -4,6 +4,11 @@ import { errorString } from "./utils";
 export type RegistryTokenCapability = "push" | "pull";
 export type RegistryAuthProtocolTokenPayload = {
   username: string;
+  // Stable identifier for the credential that authenticated this request.
+  // Defaults to the username when the credential does not declare an explicit id.
+  // Used to attribute reads to a credential for analytics without exposing the
+  // username or password itself.
+  credential_id?: string;
   account_id?: string;
   capabilities: RegistryTokenCapability[];
   exp: number;

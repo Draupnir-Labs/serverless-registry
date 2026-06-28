@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { SHA256_PREFIX_LEN, getSHA256 } from "../src/user";
+import { SHA256_PREFIX_LEN, getSHA256, UserAuthenticator } from "../src/user";
+import type { AuthenticatorCredentials } from "../src/user";
+import { parseReadonlyCredentialsJson } from "../src/authentication-method";
 import { TagsList } from "../src/router";
 import { Env } from "..";
 import { RegistryTokens } from "../src/token";
@@ -2379,4 +2381,131 @@ test("docker.io", () => {
       throw new Error(`Expected ${testCase[1]} on ${testCase[0]} but got ${isDocker}`);
     }
   }
+});
+
+// Runs the worker with an explicit env override so read-only credential
+// configuration can be exercised without mutating the shared dev bindings.
+async function fetchWithEnv(r: Request, envOverride: Env): Promise<Response> {
+  const ctx = createExecutionContext();
+  const res = await worker.fetch(r, envOverride, ctx);
+  await waitOnExecutionContext(ctx);
+  return res as Response;
+}
+
+function basicAuth(username: string, password: string): string {
+  return `Basic ${btoa(`${username}:${password}`)}`;
+}
+
+describe("read-only credentials", () => {
+  const baseEnv = env as Env;
+
+  test("UserAuthenticator carries credential_id from id, falling back to username", async () => {
+    const creds: AuthenticatorCredentials[] = [
+      { id: "ci-runner", username: "ci", password: "secret", capabilities: ["pull", "push"] },
+      { username: "legacy", password: "pw", capabilities: ["pull"] },
+    ];
+    const authenticator = new UserAuthenticator(creds);
+
+    const withId = new Request("https://registry.com/v2/", {
+      method: "GET",
+      headers: { Authorization: basicAuth("ci", "secret") },
+    });
+    const resId = await authenticator.checkCredentials(withId);
+    expect(resId.verified).toBe(true);
+    expect(resId.payload?.credential_id).toBe("ci-runner");
+    expect(resId.payload?.username).toBe("ci");
+
+    const withoutId = new Request("https://registry.com/v2/", {
+      method: "GET",
+      headers: { Authorization: basicAuth("legacy", "pw") },
+    });
+    const resFallback = await authenticator.checkCredentials(withoutId);
+    expect(resFallback.verified).toBe(true);
+    expect(resFallback.payload?.credential_id).toBe("legacy");
+  });
+
+  test("parseReadonlyCredentialsJson accepts valid entries and drops invalid ones", () => {
+    const valid = parseReadonlyCredentialsJson(
+      JSON.stringify([
+        { id: "ci", username: "ci-user", password: "ci-pw" },
+        { username: "no-id", password: "pw" },
+      ]),
+    );
+    expect(valid).toHaveLength(2);
+    expect(valid[0]).toMatchObject({ id: "ci", username: "ci-user", capabilities: ["pull"] });
+    expect(valid[1]).toMatchObject({ id: "no-id", username: "no-id", capabilities: ["pull"] });
+
+    // Missing username and password -> dropped, but the valid sibling survives.
+    const mixed = parseReadonlyCredentialsJson(
+      JSON.stringify([{ id: "ok", username: "ok", password: "ok" }, { username: "no-pw" }]),
+    );
+    expect(mixed).toHaveLength(1);
+    expect(mixed[0].id).toBe("ok");
+  });
+
+  test("parseReadonlyCredentialsJson fails closed on malformed JSON or non-array", () => {
+    expect(parseReadonlyCredentialsJson("not json")).toEqual([]);
+    expect(parseReadonlyCredentialsJson('{"id":"x","username":"x","password":"x"}')).toEqual([]);
+    expect(parseReadonlyCredentialsJson("[]")).toEqual([]);
+  });
+
+  test("READONLY_CREDENTIALS_JSON credential can pull but cannot push", async () => {
+    const envBindings: Env = {
+      ...baseEnv,
+      JWT_REGISTRY_TOKENS_PUBLIC_KEY: "",
+      USERNAME: "",
+      PASSWORD: "",
+      READONLY_USERNAME: "",
+      READONLY_PASSWORD: "",
+      READONLY_CREDENTIALS_JSON: JSON.stringify([{ id: "ci", username: "ci", password: "pull-only" }]),
+    };
+
+    const ping = await fetchWithEnv(
+      createRequest("GET", "/v2/", null, { Authorization: basicAuth("ci", "pull-only") }),
+      envBindings,
+    );
+    expect(ping.status).toBe(200);
+
+    // Push path: starting a blob upload must be rejected for a pull-only credential.
+    const push = await fetchWithEnv(
+      createRequest("POST", "/v2/readonly-creds/blobs/uploads/", null, {
+        Authorization: basicAuth("ci", "pull-only"),
+      }),
+      envBindings,
+    );
+    expect(push.status).toBe(401);
+
+    // Wrong password is rejected.
+    const wrong = await fetchWithEnv(
+      createRequest("GET", "/v2/", null, { Authorization: basicAuth("ci", "wrong") }),
+      envBindings,
+    );
+    expect(wrong.status).toBe(401);
+  });
+
+  test("legacy READONLY_USERNAME/READONLY_PASSWORD credential can pull but cannot push", async () => {
+    const envBindings: Env = {
+      ...baseEnv,
+      JWT_REGISTRY_TOKENS_PUBLIC_KEY: "",
+      USERNAME: "",
+      PASSWORD: "",
+      READONLY_USERNAME: "legacy",
+      READONLY_PASSWORD: "ro-pw",
+      READONLY_CREDENTIALS_JSON: "",
+    };
+
+    const ping = await fetchWithEnv(
+      createRequest("GET", "/v2/", null, { Authorization: basicAuth("legacy", "ro-pw") }),
+      envBindings,
+    );
+    expect(ping.status).toBe(200);
+
+    const push = await fetchWithEnv(
+      createRequest("POST", "/v2/legacy-readonly/blobs/uploads/", null, {
+        Authorization: basicAuth("legacy", "ro-pw"),
+      }),
+      envBindings,
+    );
+    expect(push.status).toBe(401);
+  });
 });

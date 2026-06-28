@@ -34,4 +34,6 @@ PASSWORD = "world"
 # READONLY_PASSWORD = "readonly"
 # The necessary secrets are:
 # Setup those secrets on .dev.vars in the root of the project
+# READONLY_CREDENTIALS_JSON = '[{"id":"ci","username":"ci","password":"..."},{"id":"mirror","username":"mirror","password":"..."}]'
+# Each entry is pull-only; `id` falls back to `username` and is used to attribute reads.
 #

@@ -21,6 +21,9 @@
       },
       // Secrets:
       // USERNAME/PASSWORD/READONLY_USERNAME/READONLY_PASSWORD if you want username/password based auth
+      // READONLY_CREDENTIALS_JSON to issue multiple named pull-only credentials, e.g.
+      //   [{"id":"ci","username":"ci","password":"..."},{"id":"public-mirror","username":"mirror","password":"..."}]
+      // Each entry is pull-only; `id` falls back to `username` and is used to attribute reads.
     },
 
     // Dev - For local dev using `npx wrangler dev`

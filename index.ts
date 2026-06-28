@@ -21,6 +21,10 @@ export interface Env {
   PASSWORD?: string;
   READONLY_USERNAME?: string;
   READONLY_PASSWORD?: string;
+  // JSON array of read-only pull credentials: [{"id":"ci","username":"...","password":"..."}, ...].
+  // `id` is optional and falls back to `username`. Lets reads be attributed to a
+  // specific credential in analytics. Each entry is pull-only.
+  READONLY_CREDENTIALS_JSON?: string;
   PUSH_COMPATIBILITY_MODE?: PushCompatibilityMode;
   REGISTRIES_JSON?: string; // should be in the format of RegistryConfiguration[];
   REGISTRY_CLIENT: Registry;

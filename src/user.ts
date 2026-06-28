@@ -55,6 +55,10 @@ export async function getSHA256(data: string, prefix: string = SHA256_PREFIX + "
 }
 
 export type AuthenticatorCredentials = {
+  // Stable identifier for analytics attribution. When omitted the username is
+  // used. The id is carried on the auth payload as `credential_id` so downstream
+  // read attribution never needs the username or password.
+  id?: string;
   username: string;
   password: string;
   capabilities: RegistryTokenCapability[];
@@ -94,6 +98,7 @@ export class UserAuthenticator implements Authenticator {
 
     const payload = {
       username,
+      credential_id: credential.id ?? username,
       capabilities: credential.capabilities,
       exp: Date.now() + 60 * 60,
       aud: "",

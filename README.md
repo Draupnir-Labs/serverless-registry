@@ -61,6 +61,24 @@ Your registry should be up and running. It will refuse any requests if you don't
 
 Set the USERNAME and PASSWORD as secrets with `npx wrangler secret put USERNAME --env production` and `npx wrangler secret put PASSWORD --env production`.
 
+### Adding read-only pull credentials
+
+Read-only credentials can pull manifests, blobs, referrers, tags, and the catalog, but cannot push. Set a single pair with the legacy env vars:
+
+```bash
+npx wrangler secret put READONLY_USERNAME --env production
+npx wrangler secret put READONLY_PASSWORD --env production
+```
+
+To issue multiple named pull-only credentials (for example one per CI runner or downstream mirror), set `READONLY_CREDENTIALS_JSON` to a JSON array:
+
+```bash
+npx wrangler secret put READONLY_CREDENTIALS_JSON --env production
+# value example: [{"id":"ci","username":"ci","password":"..."},{"id":"mirror","username":"mirror","password":"..."}]
+```
+
+Each entry is pull-only. `id` is optional and falls back to `username`; it is carried on the auth payload as `credential_id` so reads can be attributed to a specific credential in analytics without exposing the username or password. Malformed JSON or entries missing a username or password fail closed: no read-only credentials are admitted.
+
 ### Adding JWT authentication with public key
 
 You can add a base64 encoded JWT public key to verify passwords (or token) that are signed by the private key.
