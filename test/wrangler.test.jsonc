@@ -14,6 +14,14 @@
     },
     "dev": {
       "r2_buckets": [{ "binding": "REGISTRY", "bucket_name": "r2-image-registry-dev" }],
+      "d1_databases": [
+        {
+          "binding": "ANALYTICS",
+          "database_name": "r2-registry-analytics-test",
+          "database_id": "8e0c2b3a-1d4f-4f2a-9b6c-3a1e0d7f5b22",
+          "migrations_dir": "../migrations",
+        },
+      ],
       "vars": {
         "USERNAME": "hello",
         "PASSWORD": "world",

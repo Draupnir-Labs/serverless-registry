@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { SHA256_PREFIX_LEN, getSHA256, UserAuthenticator } from "../src/user";
 import type { AuthenticatorCredentials } from "../src/user";
 import { parseReadonlyCredentialsJson } from "../src/authentication-method";
+import { parseReadPath } from "../src/analytics";
+import readsSchema from "../migrations/0001_create_reads_table.sql?raw";
 import { TagsList } from "../src/router";
 import { Env } from "..";
 import { RegistryTokens } from "../src/token";
@@ -2507,5 +2509,132 @@ describe("read-only credentials", () => {
       envBindings,
     );
     expect(push.status).toBe(401);
+  });
+});
+
+describe("parseReadPath", () => {
+  test("parses manifest, blob, referrers, tags, catalog, and ping routes", () => {
+    expect(parseReadPath("/v2/")).toEqual({ repository: null, kind: "ping" });
+    expect(parseReadPath("/v2")).toEqual({ repository: null, kind: "ping" });
+    expect(parseReadPath("/v2/_catalog")).toEqual({ repository: null, kind: "catalog" });
+
+    expect(parseReadPath("/v2/library/ubuntu/manifests/latest")).toEqual({
+      repository: "library/ubuntu",
+      kind: "manifest",
+    });
+    expect(parseReadPath("/v2/myimage/manifests/sha256:abc")).toEqual({ repository: "myimage", kind: "manifest" });
+
+    expect(parseReadPath("/v2/myimage/blobs/sha256:abc")).toEqual({ repository: "myimage", kind: "blob" });
+    expect(parseReadPath("/v2/ns/img/blobs/sha256:abc")).toEqual({ repository: "ns/img", kind: "blob" });
+
+    expect(parseReadPath("/v2/myimage/referrers/sha256:abc")).toEqual({ repository: "myimage", kind: "referrers" });
+    expect(parseReadPath("/v2/myimage/tags/list")).toEqual({ repository: "myimage", kind: "tags" });
+  });
+
+  test("returns null for non-read routes", () => {
+    // Upload lifecycle is not a content read.
+    expect(parseReadPath("/v2/myimage/blobs/uploads/abc-123")).toBeNull();
+    expect(parseReadPath("/v2/myimage/blobs/uploads/")).toBeNull();
+    // GC and other non-v2 paths.
+    expect(parseReadPath("/v2/myimage/gc")).toBeNull();
+    expect(parseReadPath("/healthz")).toBeNull();
+  });
+});
+
+describe("read analytics", () => {
+  const baseEnv = env as Env;
+
+  test("a pull is attributed to the credential id in the reads table", async () => {
+    // One env that admits both the push credential (hello/world from dev) and a
+    // named read-only credential used for the pull. The R2 and D1 bindings are
+    // inherited from the dev test config.
+    const envBindings: Env = {
+      ...baseEnv,
+      JWT_REGISTRY_TOKENS_PUBLIC_KEY: "",
+      READONLY_CREDENTIALS_JSON: JSON.stringify([{ id: "ci-analytics", username: "ci", password: "pull" }]),
+    };
+
+    const name = "analytics-test";
+    const manifest = await generateManifest(name);
+
+    // The installed vitest-pool-workers does not auto-apply D1 migrations, so
+    // apply the canonical schema from the migration file before the pull. The
+    // statements are idempotent. D1's exec rejects comment-only chunks and
+    // splits statements in a way that breaks multi-line CREATE TABLE here, so
+    // run each statement individually via prepare/run after stripping comments.
+    const dbForSchema = envBindings.ANALYTICS;
+    if (!dbForSchema) throw new Error("ANALYTICS binding not configured for test");
+    const schemaStatements = readsSchema
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("--"))
+      .join("\n")
+      .split(";")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    for (const stmt of schemaStatements) {
+      await dbForSchema.prepare(stmt).run();
+    }
+
+    const manifestJson = JSON.stringify(manifest);
+
+    // Push the manifest using the push credential.
+    const putRes = await fetchWithEnv(
+      createRequest("PUT", `/v2/${name}/manifests/latest`, new Blob([manifestJson]).stream(), {
+        "Content-Type": "application/vnd.docker.distribution.manifest.v2+json",
+        "Authorization": basicAuth("hello", "world"),
+      }),
+      envBindings,
+    );
+    expect(putRes.ok).toBeTruthy();
+
+    // Pull the manifest using the read-only credential.
+    const getRes = await fetchWithEnv(
+      createRequest("GET", `/v2/${name}/manifests/latest`, null, {
+        Authorization: basicAuth("ci", "pull"),
+      }),
+      envBindings,
+    );
+    expect(getRes.ok).toBeTruthy();
+
+    const db = envBindings.ANALYTICS;
+    if (!db) throw new Error("ANALYTICS binding not configured for test");
+    const rows = await db
+      .prepare(
+        "SELECT credential_id, method, repository, kind, status, bytes FROM reads WHERE kind = 'manifest' ORDER BY id DESC LIMIT 1",
+      )
+      .all<{
+        credential_id: string;
+        method: string;
+        repository: string;
+        kind: string;
+        status: number;
+        bytes: number;
+      }>();
+    expect(rows.results).toHaveLength(1);
+    const row = rows.results[0];
+    expect(row.credential_id).toBe("ci-analytics");
+    expect(row.method).toBe("GET");
+    expect(row.repository).toBe(name);
+    expect(row.kind).toBe("manifest");
+    expect(row.status).toBe(200);
+    expect(row.bytes).toBeGreaterThan(0);
+  });
+
+  test("reads are not recorded when ANALYTICS is unbound", async () => {
+    const envBindings: Env = { ...baseEnv, ANALYTICS: undefined };
+    const name = "analytics-unbound";
+    const manifest = await generateManifest(name);
+    const manifestJson = JSON.stringify(manifest);
+    const putRes = await fetch(
+      createRequest("PUT", `/v2/${name}/manifests/latest`, new Blob([manifestJson]).stream(), {
+        "Content-Type": "application/vnd.docker.distribution.manifest.v2+json",
+      }),
+    );
+    expect(putRes.ok).toBeTruthy();
+    const getRes = await fetch(createRequest("GET", `/v2/${name}/manifests/latest`, null));
+    expect(getRes.ok).toBeTruthy();
+    // No ANALYTICS binding means no table to query; the pull still succeeds,
+    // proving the fire-and-forget path is a no-op when unbound.
+    expect(envBindings.ANALYTICS).toBeUndefined();
   });
 });

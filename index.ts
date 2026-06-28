@@ -6,6 +6,7 @@ import { Router } from "itty-router";
 import { AuthErrorResponse, InternalError } from "./src/errors";
 import v2Router from "./src/router";
 import { authenticationMethodFromEnv } from "./src/authentication-method";
+import { recordRead } from "./src/analytics";
 import { Registry } from "./src/registry/registry";
 import { R2Registry } from "./src/registry/r2";
 
@@ -27,6 +28,10 @@ export interface Env {
   READONLY_CREDENTIALS_JSON?: string;
   PUSH_COMPATIBILITY_MODE?: PushCompatibilityMode;
   REGISTRIES_JSON?: string; // should be in the format of RegistryConfiguration[];
+  // Optional D1 binding for read attribution analytics. When present, every
+  // authenticated pull is recorded fire-and-forget into the `reads` table.
+  // See migrations/0001_create_reads_table.sql.
+  ANALYTICS?: D1Database;
   REGISTRY_CLIENT: Registry;
 }
 
@@ -56,10 +61,19 @@ export default {
       return new AuthErrorResponse(request);
     }
 
+    // Stable identifier of the credential that authenticated this request, used
+    // to attribute reads in analytics. Falls back to the username, then to
+    // "unknown" for auth modes that do not set either (e.g. JWT without an id).
+    const credentialId = credentials.payload?.credential_id ?? credentials.payload?.username ?? "unknown";
+
     env.REGISTRY_CLIENT = new R2Registry(env);
     try {
       // Dispatch the request to the appropriate route
       const res = await router.fetch(request, env, context);
+      // Fire-and-forget read attribution. No-op when ANALYTICS is unbound or the
+      // request is not a content read, and swallows insert failures so analytics
+      // can never break a pull.
+      recordRead(env, context, request, res, credentialId);
       return res;
     } catch (err) {
       if (err instanceof Response) {
